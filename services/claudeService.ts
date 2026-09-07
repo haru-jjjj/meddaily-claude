@@ -183,6 +183,18 @@ async function callClaudeForStudyCard(system: string, prompt: string, useSearch:
   return toolUse.input;
 }
 
+/**
+ * The model sometimes echoes its own inline citation markup (e.g. <cite index="...">...</cite>)
+ * into the markdown body when it has used web_search. Strip the tags but keep the inner text,
+ * since attribution belongs only in the separate "sources" field, not inline in the article.
+ */
+function stripCitationMarkup(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/<cite[^>]*>/gi, "")
+    .replace(/<\/cite>/gi, "");
+}
+
 function toStudyContent(input: any, language: Language): StudyContent {
   const sources: Source[] = [];
   const seenUris = new Set<string>();
@@ -196,56 +208,12 @@ function toStudyContent(input: any, language: Language): StudyContent {
   }
   return {
     title: input.title || (language === Language.KOREAN ? "의학 주제" : "Medical Topic"),
-    content: input.markdownBody || "No content generated.",
+    content: stripCitationMarkup(input.markdownBody || "No content generated."),
     topic: input.topic || "General",
     sources,
     suggestedTopics: Array.isArray(input.suggestedTopics) ? input.suggestedTopics : []
   };
 }
-
-// --- Weekly medical pearls for the loading screen ---
-const FACTS_TOOL = {
-  name: "submit_facts",
-  description: "Submit the list of medical pearls.",
-  input_schema: {
-    type: "object",
-    properties: { facts: { type: "array", items: { type: "string" } } },
-    required: ["facts"]
-  }
-};
-
-export const generateWeeklyMedicalFacts = async (language: Language = Language.ENGLISH): Promise<string[]> => {
-  return withRetry(async () => {
-    const randomSalt = Math.random().toString(36).substring(7);
-    const prompt = `
-      Task: Generate 50 unique, high-yield 'Medical Pearls'.
-      Audience: Medical professionals.
-      Constraint: Ensure variety (Internal Med, Cards, Neuro, etc).
-      [Random Seed: ${randomSalt}]
-      Language: ${language}
-      Call submit_facts with the list.
-    `;
-    try {
-      const res = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-        body: JSON.stringify({
-          model: MODEL_NAME,
-          max_tokens: 2000,
-          messages: [{ role: "user", content: prompt }],
-          tools: [FACTS_TOOL],
-          tool_choice: { type: "tool", name: "submit_facts" }
-        })
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      const toolUse = (data.content || []).find((b: any) => b.type === "tool_use" && b.name === "submit_facts");
-      return toolUse && Array.isArray(toolUse.input?.facts) ? toolUse.input.facts : [];
-    } catch (error) {
-      return [];
-    }
-  }, 1);
-};
 
 // --- Main topic generator (7-sided diversity dice, unchanged strategy from original) ---
 export const generateMedicalTopic = async (
@@ -391,7 +359,7 @@ export const generateMedicalTopic = async (
     const lengthInstruction = getLengthInstruction(length);
     const languageStyle = getLanguageStyleGuide(language);
 
-    const system = `Act as a senior medical educator writing a single study card.`;
+    const system = `Act as a senior medical educator writing a single study card. Write markdownBody as plain prose/markdown only — never include <cite>, citation index tags, or any inline citation markup; attribution belongs only in the separate sources field.`;
 
     const prompt = `
       ${promptContext}
@@ -433,7 +401,7 @@ export const generateTopicFromKeyword = async (
     const languageStyle = getLanguageStyleGuide(language);
     const randomSalt = Math.random().toString(36).substring(7);
 
-    const system = `Act as a senior medical educator writing a single study card.`;
+    const system = `Act as a senior medical educator writing a single study card. Write markdownBody as plain prose/markdown only — never include <cite>, citation index tags, or any inline citation markup; attribution belongs only in the separate sources field.`;
     const prompt = `
       Topic: **"${keyword}"**
       Context: Clinical Practice & Standards.
@@ -478,7 +446,7 @@ export const rewriteContent = async (
     const lengthInstruction = getLengthInstruction(length);
     const languageStyle = getLanguageStyleGuide(language);
 
-    const system = `Act as a senior medical educator rewriting a study card.`;
+    const system = `Act as a senior medical educator rewriting a study card. Write markdownBody as plain prose/markdown only — never include <cite>, citation index tags, or any inline citation markup; attribution belongs only in the separate sources field.`;
     const prompt = `
         Task: Rewrite content for topic: **"${currentTopic}"**.
 

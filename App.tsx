@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DEFAULT_CATEGORY } from './constants';
 import { SubCategory, StudyContent, Language, StudyLength } from './types';
-import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword, generateWeeklyMedicalFacts } from './services/claudeService';
+import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword } from './services/claudeService';
 import { Button } from './components/Button';
 import { Loading } from './components/Loading';
 import { SourceList } from './components/SourceList';
@@ -34,55 +34,6 @@ const App: React.FC = () => {
   const [activeLength, setActiveLength] = useState<StudyLength>(StudyLength.MEDIUM);
   const [isRandomMode, setIsRandomMode] = useState(false);
   const [forceResearchMode, setForceResearchMode] = useState(false);
-  
-  // Medical Facts Pool State
-  const [medicalFacts, setMedicalFacts] = useState<string[]>([]);
-  const [isFactsUpdating, setIsFactsUpdating] = useState(false);
-
-  // --- Weekly Facts Update Logic ---
-  useEffect(() => {
-    const checkAndRefreshFacts = async () => {
-      const storedFactsStr = localStorage.getItem('medDaily_facts');
-      const nextUpdateStr = localStorage.getItem('medDaily_nextUpdate');
-      const now = Date.now();
-
-      const needsUpdate = !storedFactsStr || !nextUpdateStr || now > parseInt(nextUpdateStr);
-
-      if (needsUpdate) {
-        setIsFactsUpdating(true);
-        try {
-          console.log("Fetching new weekly medical facts...");
-          const newFacts = await generateWeeklyMedicalFacts();
-          
-          if (newFacts && newFacts.length >= 5) {
-            setMedicalFacts(newFacts);
-            localStorage.setItem('medDaily_facts', JSON.stringify(newFacts));
-
-            const today = new Date();
-            const currentDay = today.getDay();
-            let daysToAdd = (1 + 7 - currentDay) % 7;
-            if (daysToAdd === 0) daysToAdd = 7; 
-
-            const nextUpdateDate = new Date(today);
-            nextUpdateDate.setDate(today.getDate() + daysToAdd);
-            nextUpdateDate.setHours(0, 0, 0, 0); 
-
-            localStorage.setItem('medDaily_nextUpdate', nextUpdateDate.getTime().toString());
-          } else {
-             if (storedFactsStr) setMedicalFacts(JSON.parse(storedFactsStr));
-          }
-        } catch (e) {
-          if (storedFactsStr) setMedicalFacts(JSON.parse(storedFactsStr));
-        } finally {
-          setIsFactsUpdating(false);
-        }
-      } else {
-        setMedicalFacts(JSON.parse(storedFactsStr));
-      }
-    };
-
-    checkAndRefreshFacts();
-  }, []);
 
   // --- Automatic Background Prefetch Logic ---
   const triggerBackgroundPrefetch = async (
@@ -139,7 +90,7 @@ const App: React.FC = () => {
   // --- Wake Lock Implementation ---
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
-    const isLoading = loading || backgroundLoading || isFactsUpdating;
+    const isLoading = loading || backgroundLoading;
 
     const requestWakeLock = async () => {
       if ('wakeLock' in navigator) {
@@ -179,7 +130,7 @@ const App: React.FC = () => {
       releaseWakeLock();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [loading, backgroundLoading, isFactsUpdating]);
+  }, [loading, backgroundLoading]);
 
   const startLearning = async (
     category: SubCategory, 
@@ -336,24 +287,6 @@ const App: React.FC = () => {
     }
   };
 
-  if (isFactsUpdating) {
-    return (
-      <div className="min-h-screen bg-white flex items-center justify-center p-4">
-        <Loading 
-          message="Updating Medical Pearls Database..." 
-          customFacts={[
-             "Reviewing latest clinical guidelines...",
-             "Generating new high-yield facts for the week...",
-             "Consulting medical literature...",
-             "Refreshing study topics...",
-             "Analyzing recent trials...",
-             "This happens once a week to keep content fresh."
-          ]} 
-        />
-      </div>
-    );
-  }
-
   if (!hasStarted) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-slate-100 flex items-center justify-center p-4">
@@ -434,7 +367,6 @@ const App: React.FC = () => {
           <div className="relative">
              <Loading 
                 message="Consulting guidelines and generating study material..." 
-                customFacts={medicalFacts} 
              />
              <div className="absolute top-2 right-2">
                <button 
