@@ -157,7 +157,8 @@ async function callClaudeForStudyCard(system: string, prompt: string, useSearch:
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey || "",
-      "anthropic-version": "2023-06-01"
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
     },
     body: JSON.stringify({
       model: MODEL_NAME,
@@ -227,7 +228,7 @@ export const generateWeeklyMedicalFacts = async (language: Language = Language.E
     try {
       const res = await fetch(API_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01" },
+        headers: { "Content-Type": "application/json", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify({
           model: MODEL_NAME,
           max_tokens: 2000,
