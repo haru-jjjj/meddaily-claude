@@ -80,53 +80,40 @@ const App: React.FC = () => {
     }, 2000);
   };
 
-  // Automatically trigger prefetch when currentContent changes, and remember this
-  // session locally so it can be shown instantly on the next app launch.
+  // Automatically trigger prefetch when currentContent changes, and remember it
+  // locally so it can be shown during the loading phase of the *next* launch.
   useEffect(() => {
     if (currentContent && hasStarted) {
       triggerBackgroundPrefetch(activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode);
       try {
-        localStorage.setItem('medDaily_lastSession', JSON.stringify({
-          content: currentContent,
-          category: activeCategory,
-          language: activeLanguage,
-          length: activeLength,
-          isRandom: isRandomMode,
-          forceResearch: forceResearchMode
-        }));
+        localStorage.setItem('medDaily_lastContent', JSON.stringify(currentContent));
       } catch (e) {
-        console.warn('Failed to persist last session', e);
+        console.warn('Failed to persist last content', e);
       }
     }
   }, [currentContent, hasStarted, activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode]);
 
-  // On launch, restore the last session instantly (no spinner) while a fresh
-  // topic quietly generates in the background via the prefetch effect above.
+  // On launch, just load the last article into memory (does NOT skip the
+  // selection screen or touch hasStarted/settings). It's used later, once the
+  // user picks their settings and hits Start, to fill the loading screen.
+  const [cachedContent, setCachedContent] = useState<StudyContent | null>(null);
+  const [isRefreshingInitial, setIsRefreshingInitial] = useState(false);
   useEffect(() => {
     try {
-      const stored = localStorage.getItem('medDaily_lastSession');
+      const stored = localStorage.getItem('medDaily_lastContent');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed && parsed.content && parsed.content.content) {
-          setActiveCategory(parsed.category ?? DEFAULT_CATEGORY);
-          setActiveLanguage(parsed.language ?? Language.KOREAN);
-          setActiveLength(parsed.length ?? StudyLength.MEDIUM);
-          setIsRandomMode(!!parsed.isRandom);
-          setForceResearchMode(!!parsed.forceResearch);
-          setCurrentContent(parsed.content);
-          setHasStarted(true);
-        }
+        if (parsed && parsed.content) setCachedContent(parsed);
       }
     } catch (e) {
-      console.warn('Failed to restore last session', e);
+      console.warn('Failed to load cached content', e);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- Wake Lock Implementation ---
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
-    const isLoading = loading || backgroundLoading;
+    const isLoading = loading || backgroundLoading || isRefreshingInitial;
 
     const requestWakeLock = async () => {
       if ('wakeLock' in navigator) {
@@ -166,7 +153,7 @@ const App: React.FC = () => {
       releaseWakeLock();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [loading, backgroundLoading]);
+  }, [loading, backgroundLoading, isRefreshingInitial]);
 
   const startLearning = async (
     category: SubCategory, 
@@ -182,10 +169,28 @@ const App: React.FC = () => {
     setForceResearchMode(forceResearch);
     setHasStarted(true);
     setNextContent(null);
-    
-    // Initial load is always blocking
-    await fetchNewTopic(category, isRandom, language, studyLength, forceResearch, true);
+
+    if (cachedContent) {
+      // Show the last article right away instead of a blank loading screen,
+      // while the freshly-selected topic generates quietly underneath.
+      setCurrentContent(cachedContent);
+      setIsRefreshingInitial(true);
+      try {
+        const content = await generateMedicalTopic(category, isRandom, language, studyLength, forceResearch);
+        setCurrentContent(content);
+      } catch (error) {
+        console.error(error);
+        alert("Failed to load topic. Please check your connection and API key.");
+        // Keep showing the cached article as a fallback.
+      } finally {
+        setIsRefreshingInitial(false);
+      }
+    } else {
+      // No cached article yet (first-ever use) — fall back to the blocking loader.
+      await fetchNewTopic(category, isRandom, language, studyLength, forceResearch, true);
+    }
   };
+
 
   const fetchNewTopic = async (
     category: SubCategory, 
@@ -378,7 +383,7 @@ const App: React.FC = () => {
             variant="outline" 
             className="text-xs py-2 px-3 h-9"
             onClick={() => setIsSettingsOpen(true)}
-            disabled={loading || backgroundLoading}
+            disabled={loading || backgroundLoading || isRefreshingInitial}
           >
             <span className="hidden sm:inline mr-1">Current:</span> 
             {isRandomMode ? 'Random' : (activeCategory === SubCategory.OTHER_GENERAL ? 'Other' : activeCategory)}
@@ -422,7 +427,7 @@ const App: React.FC = () => {
                  
                  <button 
                     onClick={handleRegenerate}
-                    disabled={loading || backgroundLoading}
+                    disabled={loading || backgroundLoading || isRefreshingInitial}
                     className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-all disabled:opacity-50"
                     title="Regenerate Content (Fix markdown/errors)"
                  >
@@ -438,7 +443,7 @@ const App: React.FC = () => {
                            ? 'bg-white text-blue-700 shadow-sm' 
                            : 'text-slate-500 hover:text-slate-800'
                         }`}
-                        disabled={loading || backgroundLoading}
+                        disabled={loading || backgroundLoading || isRefreshingInitial}
                       >
                         {len}
                       </button>
@@ -520,7 +525,25 @@ const App: React.FC = () => {
       </main>
 
       {/* Background Status Floating Action Button Area */}
-      
+
+      {/* CASE 0: Refreshing right after the selection screen (showing cached article underneath) */}
+      {isRefreshingInitial && (
+        <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
+          <div className="flex items-center gap-3 bg-white/90 backdrop-blur-sm text-slate-800 pl-4 pr-4 py-3 rounded-full shadow-xl border border-blue-200">
+            <div className="flex flex-col items-start">
+               <span className="text-[10px] uppercase font-bold text-blue-500">Showing your last topic</span>
+               <span className="text-sm font-semibold leading-none">Generating new one...</span>
+            </div>
+            <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
+               <svg className="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+               </svg>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CASE 1: Loading in Background */}
       {backgroundLoading && !nextContent && (
         <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
