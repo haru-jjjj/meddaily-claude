@@ -80,12 +80,48 @@ const App: React.FC = () => {
     }, 2000);
   };
 
-  // Automatically trigger prefetch when currentContent changes
+  // Automatically trigger prefetch when currentContent changes, and remember this
+  // session locally so it can be shown instantly on the next app launch.
   useEffect(() => {
     if (currentContent && hasStarted) {
       triggerBackgroundPrefetch(activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode);
+      try {
+        localStorage.setItem('medDaily_lastSession', JSON.stringify({
+          content: currentContent,
+          category: activeCategory,
+          language: activeLanguage,
+          length: activeLength,
+          isRandom: isRandomMode,
+          forceResearch: forceResearchMode
+        }));
+      } catch (e) {
+        console.warn('Failed to persist last session', e);
+      }
     }
   }, [currentContent, hasStarted, activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode]);
+
+  // On launch, restore the last session instantly (no spinner) while a fresh
+  // topic quietly generates in the background via the prefetch effect above.
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('medDaily_lastSession');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && parsed.content && parsed.content.content) {
+          setActiveCategory(parsed.category ?? DEFAULT_CATEGORY);
+          setActiveLanguage(parsed.language ?? Language.KOREAN);
+          setActiveLength(parsed.length ?? StudyLength.MEDIUM);
+          setIsRandomMode(!!parsed.isRandom);
+          setForceResearchMode(!!parsed.forceResearch);
+          setCurrentContent(parsed.content);
+          setHasStarted(true);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to restore last session', e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- Wake Lock Implementation ---
   useEffect(() => {
