@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DEFAULT_CATEGORY } from './constants';
-import { SubCategory, StudyContent, Language, StudyLength } from './types';
-import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword, DraftHandler } from './services/claudeService';
+import { SubCategory, StudyContent, Language, StudyLength, Series } from './types';
+import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword, DraftHandler, setStudyContext, planSeries, generateSeriesPart } from './services/claudeService';
+import { store, type SyncStatus } from './services/store';
+import { newId } from './services/id';
+import { initialReview, answerReview, dueCards, countBySpecialty } from './services/review';
+import { BottomNav, View } from './components/BottomNav';
+import { HistoryView } from './components/HistoryView';
+import { ReviewView } from './components/ReviewView';
+import { SeriesView } from './components/SeriesView';
+import { labelsFor } from './components/labels';
 import { Button } from './components/Button';
 import { Loading } from './components/Loading';
 import { SourceList } from './components/SourceList';
@@ -29,7 +37,35 @@ const markdownComponents: any = {
 };
 
 const App: React.FC = () => {
+  // hasStarted = the user picked settings and started a random/category session
+  // (enables auto-prefetch). Cards can also be opened from history/series without it.
   const [hasStarted, setHasStarted] = useState(false);
+
+  // --- Tabs + synced data (history, review, series) ---
+  const [view, setView] = useState<View>('study');
+  const [cards, setCards] = useState<StudyContent[]>([]);
+  const [seriesList, setSeriesList] = useState<Series[]>([]);
+  const [sync, setSync] = useState<{ status: SyncStatus; message?: string }>({ status: store.mode === 'local' ? 'local' : 'connecting' });
+  const [creatingSeries, setCreatingSeries] = useState(false);
+  const [reviewBannerHidden, setReviewBannerHidden] = useState(false);
+
+  useEffect(() => {
+    const u1 = store.subscribeCards(setCards);
+    const u2 = store.subscribeSeries(setSeriesList);
+    const u3 = store.subscribeStatus(setSync);
+    return () => { u1(); u2(); u3(); };
+  }, []);
+
+  // Feed history into topic selection: weight random mode toward specialties
+  // read less in the last 2 weeks, and avoid topics already read on any device.
+  useEffect(() => {
+    setStudyContext({
+      coverage: countBySpecialty(cards),
+      topics: cards.slice(0, 60).map(c => c.topic).filter(Boolean)
+    });
+  }, [cards]);
+
+  const dueCount = dueCards(cards).length;
   
   // Main Loading State (Blocking)
   const [loading, setLoading] = useState(false);
@@ -55,18 +91,26 @@ const App: React.FC = () => {
   // written, and drops the result if the user cancelled in the meantime.
   const runBlocking = async (
     generate: (onDraft: DraftHandler) => Promise<StudyContent>,
-    errorMessage: string
-  ) => {
+    errorMessage: string,
+    transform?: (c: StudyContent) => StudyContent
+  ): Promise<StudyContent | null> => {
     const id = ++blockingIdRef.current;
     setDraft(null);
     setLoading(true);
+    setView('study');
     window.scrollTo({ top: 0, behavior: 'smooth' });
     try {
-      const content = await generate(makeDraftHandler(id));
-      if (id === blockingIdRef.current) setCurrentContent(content);
+      let content = await generate(makeDraftHandler(id));
+      if (transform) content = transform(content);
+      if (id === blockingIdRef.current) {
+        setCurrentContent(content);
+        return content;
+      }
+      return null;
     } catch (error) {
       console.error(error);
       if (id === blockingIdRef.current) alert(errorMessage);
+      return null;
     } finally {
       if (id === blockingIdRef.current) {
         setLoading(false);
@@ -131,8 +175,10 @@ const App: React.FC = () => {
   // Automatically trigger prefetch when currentContent changes, and remember it
   // locally so it can be shown during the loading phase of the *next* launch.
   useEffect(() => {
-    if (currentContent && hasStarted) {
+    if (currentContent && hasStarted && !currentContent.seriesId) {
       triggerBackgroundPrefetch(activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode);
+    }
+    if (currentContent) {
       try {
         localStorage.setItem('medDaily_lastContent', JSON.stringify(currentContent));
       } catch (e) {
@@ -140,6 +186,18 @@ const App: React.FC = () => {
       }
     }
   }, [currentContent, hasStarted, activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode]);
+
+  // Save every card the user actually sees into history (once). Cards that
+  // were prefetched but never opened are not saved.
+  useEffect(() => {
+    if (!currentContent || !currentContent.id || currentContent.readAt) return;
+    const now = Date.now();
+    store.saveCardIfNew({
+      ...currentContent,
+      readAt: now,
+      review: currentContent.recall ? initialReview(now) : undefined
+    }).catch(e => console.warn('Save to history failed', e));
+  }, [currentContent]);
 
   // On launch, just load the last article into memory (does NOT skip the
   // selection screen or touch hasStarted/settings). It's used later, once the
@@ -150,7 +208,7 @@ const App: React.FC = () => {
       const stored = localStorage.getItem('medDaily_lastContent');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed && parsed.content) setCachedContent(parsed);
+        if (parsed && parsed.content) setCachedContent(parsed.id ? parsed : { ...parsed, id: newId() });
       }
     } catch (e) {
       console.warn('Failed to load cached content', e);
@@ -217,15 +275,21 @@ const App: React.FC = () => {
     setHasStarted(true);
     setNextContent(null);
 
-    if (cachedContent) {
-      // Show the last article right away, and generate the freshly-selected
-      // topic the same way the normal "next topic" prefetch works: into
+    // Something to keep on screen while the new topic is generated:
+    // - mid-session (settings changed while reading): keep the current article
+    // - fresh launch: the article saved from the previous session
+    const keepOnScreen = currentContent ?? cachedContent;
+    // The saved launch article is only for the very first start.
+    setCachedContent(null);
+
+    if (keepOnScreen) {
+      // Generate the freshly-selected topic in the background into
       // nextContent, so it only replaces what's on screen once the user
       // taps "Open Next Topic" — never mid-read.
       // Mark as prefetching so the auto-prefetch effect doesn't start a
       // second, duplicate request for the same slot.
       isPrefetching.current = true;
-      setCurrentContent(cachedContent);
+      if (!currentContent) setCurrentContent(keepOnScreen);
       const myId = ++fetchIdRef.current;
       setBackgroundLoading(true);
       try {
@@ -330,65 +394,96 @@ const App: React.FC = () => {
   const handleChangeLength = async (newLength: StudyLength) => {
     if (!currentContent) return;
     if (newLength === activeLength) return;
-    const topic = currentContent.topic;
+    const prev = currentContent;
     setActiveLength(newLength);
     setNextContent(null);
     await runBlocking(
-      (onDraft) => rewriteContent(topic, newLength, activeLanguage, onDraft),
-      "Failed to rewrite content. Please try again."
+      (onDraft) => rewriteContent(prev.topic, newLength, activeLanguage, onDraft),
+      "Failed to rewrite content. Please try again.",
+      (c) => keepCardIdentity(prev, c)
     );
   };
 
   const handleRegenerate = async () => {
     if (!currentContent) return;
-    const topic = currentContent.topic;
+    const prev = currentContent;
     await runBlocking(
-      (onDraft) => rewriteContent(topic, activeLength, activeLanguage, onDraft),
-      "Failed to regenerate content."
+      (onDraft) => rewriteContent(prev.topic, activeLength, activeLanguage, onDraft),
+      "Failed to regenerate content.",
+      (c) => keepCardIdentity(prev, c)
     );
   };
 
-  if (!hasStarted) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-slate-100 flex items-center justify-center p-4">
-        <div className="max-w-xl w-full text-center space-y-8">
-          <div className="bg-white p-8 rounded-2xl shadow-xl border border-slate-100">
-            <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4.8 2.3A.3.3 0 0 1 5 2h14a.3.3 0 0 1 .2.3v17a.3.3 0 0 1-.2.3H5a.3.3 0 0 1-.2-.3V2.3z"></path><path d="M18 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"></path><line x1="12" y1="6" x2="12" y2="18"></line><line x1="6" y1="12" x2="18" y2="12"></line></svg>
-            </div>
-            <h1 className="text-4xl font-extrabold text-slate-800 mb-2 tracking-tight">MedDaily</h1>
-            <p className="text-slate-500 text-lg mb-8">
-              Bite-sized, evidence-based medical learning tailored for busy professionals.
-              Focus on Internal Medicine, Cardiology, and more.
-            </p>
-            <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800 mb-6">
-               <p>Supports Korean, English, and Japanese.</p>
-            </div>
-            <Button 
-              onClick={() => setIsSettingsOpen(true)} 
-              fullWidth
-              className="text-lg py-4"
-            >
-              Start Learning Session
-            </Button>
-            <p className="mt-4 text-xs text-slate-400">
-              Powered by Claude. Verified with web search.
-            </p>
-          </div>
-        </div>
-        <SettingsModal 
-          isOpen={isSettingsOpen} 
-          onClose={() => setIsSettingsOpen(false)}
-          onStart={startLearning}
-          initialCategory={activeCategory}
-          initialLanguage={activeLanguage}
-        />
-      </div>
+  // A rewritten card replaces the same history entry (keeps its id, read date,
+  // review progress and series position) instead of adding a new one.
+  const keepCardIdentity = (prev: StudyContent, next: StudyContent): StudyContent => {
+    const saved = cards.find(c => c.id === prev.id);
+    const merged: StudyContent = {
+      ...next,
+      id: prev.id,
+      createdAt: prev.createdAt,
+      readAt: saved?.readAt ?? prev.readAt,
+      review: saved?.review ?? prev.review,
+      specialty: prev.specialty ?? next.specialty,
+      seriesId: prev.seriesId,
+      seriesIndex: prev.seriesIndex,
+      seriesTitle: prev.seriesTitle,
+    };
+    if (prev.id && merged.readAt) {
+      const { id, createdAt, readAt, review, ...contentFields } = merged;
+      store.updateCard(prev.id, contentFields).catch(e => console.warn('Update failed', e));
+    }
+    return merged;
+  };
+
+  // --- History / review / series actions ---
+  const openCard = (card: StudyContent) => {
+    setCurrentContent(card);
+    setView('study');
+    window.scrollTo({ top: 0 });
+  };
+
+  const handleReviewAnswer = (card: StudyContent, correct: boolean) => {
+    if (!card.id) return;
+    store.updateCard(card.id, { review: answerReview(card.review, correct) })
+      .catch(e => console.warn('Review update failed', e));
+  };
+
+  const handleCreateSeries = async (theme: string, partCount: number) => {
+    setCreatingSeries(true);
+    try {
+      const s = await planSeries(theme, partCount, activeLanguage, activeLength);
+      await store.saveSeries(s);
+    } catch (e) {
+      console.error(e);
+      alert(labelsFor(activeLanguage).seriesFailed);
+    } finally {
+      setCreatingSeries(false);
+    }
+  };
+
+  const openSeriesPart = async (series: Series, index: number) => {
+    const existing = cards
+      .filter(c => c.seriesId === series.id && c.seriesIndex === index)
+      .sort((a, b) => (b.readAt || 0) - (a.readAt || 0))[0];
+    if (existing) { openCard(existing); return; }
+    const content = await runBlocking(
+      (onDraft) => generateSeriesPart(series, index, cards.filter(c => c.seriesId === series.id), onDraft),
+      "Failed to write this part. Please try again."
     );
-  }
+    if (content) {
+      store.updateSeries(series.id, {
+        parts: series.parts.map((p, i) => i === index ? { ...p, cardId: content.id } : p),
+        updatedAt: Date.now()
+      }).catch(e => console.warn('Series update failed', e));
+    }
+  };
+
+  const L = labelsFor(activeLanguage);
+  const currentSeries = currentContent?.seriesId ? seriesList.find(x => x.id === currentContent.seriesId) : undefined;
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-20 relative">
+    <div className="min-h-screen bg-slate-50 pb-28 relative">
       {/* Header */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -398,6 +493,7 @@ const App: React.FC = () => {
            <span className="font-semibold text-slate-700 hidden sm:block">MedDaily</span>
         </div>
         
+        {view === 'study' && (
         <div className="flex gap-2">
           <Button 
             variant="outline" 
@@ -414,16 +510,43 @@ const App: React.FC = () => {
           <Button 
             variant="primary"
             className="text-xs py-2 px-3 h-9 flex items-center gap-2"
-            onClick={() => fetchNewTopic(activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode)}
+            onClick={() => hasStarted
+              ? fetchNewTopic(activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode)
+              : setIsSettingsOpen(true)}
             disabled={loading} 
           >
              {nextContent ? "Open Next Topic" : "New Topic"}
           </Button>
         </div>
+        )}
+        {view !== 'study' && (
+          <span className="text-sm font-semibold text-slate-700">
+            {view === 'history' ? L.historyTitle : view === 'review' ? L.reviewTitle : L.seriesTitle}
+          </span>
+        )}
       </header>
 
       {/* Content Area */}
       <main className="max-w-3xl mx-auto p-4 md:p-8">
+        {view === 'history' ? (
+          <HistoryView cards={cards} language={activeLanguage} sync={sync} onOpen={openCard}
+            onDelete={(id) => store.deleteCard(id).catch(e => alert(String(e)))} />
+        ) : view === 'review' ? (
+          <ReviewView cards={cards} language={activeLanguage} onAnswer={handleReviewAnswer} onOpenCard={openCard} />
+        ) : view === 'series' ? (
+          <SeriesView seriesList={seriesList} cards={cards} language={activeLanguage} creating={creatingSeries}
+            onCreate={handleCreateSeries} onOpenPart={openSeriesPart}
+            onDelete={(id) => store.deleteSeries(id).catch(e => alert(String(e)))} />
+        ) : (
+        <>
+        {dueCount > 0 && !reviewBannerHidden && !loading && (
+          <div className="mb-4 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+            <button onClick={() => setView('review')} className="flex-1 text-left text-sm font-medium text-amber-800">
+              {L.reviewBanner(dueCount)} →
+            </button>
+            <button onClick={() => setReviewBannerHidden(true)} className="text-amber-500 text-lg leading-none px-1">×</button>
+          </div>
+        )}
         {loading && draft && draft.body ? (
           <article className="bg-white p-6 md:p-10 rounded-2xl shadow-sm border border-slate-100 prose prose-slate prose-blue max-w-none relative">
             <div className="not-prose flex items-center justify-between mb-4">
@@ -509,6 +632,15 @@ const App: React.FC = () => {
                 )}
               </div>
               
+              {currentContent.seriesTitle && (
+                <button
+                  onClick={() => setView('series')}
+                  className="not-prose block mb-3 text-xs font-semibold text-violet-700 bg-violet-50 rounded-md px-2 py-1"
+                >
+                  {L.seriesBadge(currentContent.seriesTitle, (currentContent.seriesIndex ?? 0) + 1, currentSeries?.parts.length ?? 0)}
+                </button>
+              )}
+
               <h1 className="text-3xl font-extrabold text-slate-900 mb-6 leading-tight">
                 {currentContent.title}
               </h1>
@@ -520,6 +652,15 @@ const App: React.FC = () => {
               </div>
 
               {currentContent.flowchart && <Flowchart code={currentContent.flowchart} />}
+
+              {currentSeries && typeof currentContent.seriesIndex === 'number' && currentContent.seriesIndex + 1 < currentSeries.parts.length && (
+                <button
+                  onClick={() => openSeriesPart(currentSeries, (currentContent.seriesIndex as number) + 1)}
+                  className="not-prose mt-8 w-full py-3 px-4 rounded-xl bg-violet-600 text-white text-sm font-semibold text-left"
+                >
+                  {L.seriesNext(currentSeries.parts[(currentContent.seriesIndex as number) + 1].title)} →
+                </button>
+              )}
 
               <ImagePanel queries={currentContent.imageQueries || []} language={activeLanguage} />
 
@@ -548,17 +689,33 @@ const App: React.FC = () => {
             </article>
           </>
         ) : (
-          <div className="text-center py-20">
-             <p className="text-slate-500">Ready to start? Select a topic or choose random mode.</p>
+          <div className="flex items-center justify-center py-6">
+            <div className="max-w-xl w-full text-center">
+              <div className="bg-white p-8 rounded-2xl shadow-xl border border-slate-100">
+                <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"></path><line x1="12" y1="6" x2="12" y2="18"></line><line x1="6" y1="12" x2="18" y2="12"></line></svg>
+                </div>
+                <h1 className="text-4xl font-extrabold text-slate-800 mb-2 tracking-tight">MedDaily</h1>
+                <p className="text-slate-500 text-lg mb-8">
+                  Bite-sized, evidence-based medical learning tailored for busy professionals.
+                </p>
+                <Button onClick={() => setIsSettingsOpen(true)} fullWidth className="text-lg py-4">
+                  Start Learning Session
+                </Button>
+                <p className="mt-4 text-xs text-slate-400">Powered by Claude. Verified with web search.</p>
+              </div>
+            </div>
           </div>
+        )}
+        </>
         )}
       </main>
 
       {/* Background Status Floating Action Button Area */}
 
       {/* CASE 1: Loading in Background */}
-      {backgroundLoading && !nextContent && (
-        <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
+      {view === 'study' && backgroundLoading && !nextContent && (
+        <div className="fixed bottom-24 right-4 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
           <div className="group flex items-center gap-3 bg-white/90 backdrop-blur-sm text-slate-800 pl-4 pr-3 py-3 rounded-full shadow-xl border border-blue-200">
             <div className="flex flex-col items-start">
                <span className="text-[10px] uppercase font-bold text-blue-500">AI working...</span>
@@ -588,8 +745,8 @@ const App: React.FC = () => {
       )}
 
       {/* CASE 2: Ready */}
-      {nextContent && (
-        <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
+      {view === 'study' && nextContent && (
+        <div className="fixed bottom-24 right-4 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
           <button 
             onClick={() => fetchNewTopic(activeCategory, isRandomMode, activeLanguage, activeLength, forceResearchMode)}
             className="group flex items-center gap-3 bg-slate-900/90 backdrop-blur-sm text-white pl-4 pr-3 py-3 rounded-full shadow-xl hover:bg-blue-600 transition-all border border-slate-700 hover:border-blue-500 hover:scale-105"
@@ -607,10 +764,12 @@ const App: React.FC = () => {
         </div>
       )}
       
+      <BottomNav view={view} onChange={(v) => { setView(v); window.scrollTo({ top: 0 }); }} dueCount={dueCount} language={activeLanguage} />
+
       <SettingsModal 
         isOpen={isSettingsOpen} 
         onClose={() => setIsSettingsOpen(false)}
-        onStart={startLearning}
+        onStart={(...args) => { setView('study'); return startLearning(...args); }}
         initialCategory={activeCategory}
         initialLanguage={activeLanguage}
       />

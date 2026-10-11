@@ -1,5 +1,6 @@
-import { StudyContent, Source, SubCategory, CategoryType, Language, StudyLength } from "../types";
+import { StudyContent, Source, SubCategory, CategoryType, Language, StudyLength, RecallQuestion, Series, SeriesPart } from "../types";
 import { CATEGORY_MAP } from "../constants";
+import { newId } from "./id";
 
 // --- API KEY ---
 // TEMPORARY: read directly from the client bundle for local dev only.
@@ -24,6 +25,17 @@ const MAX_TOKENS = 16000;
 
 export type DraftHandler = (draft: { title: string; body: string }) => void;
 
+// --- STUDY CONTEXT (fed by the app from synced history) ---
+// coverage: cards read per specialty in the last 2 weeks -> random mode
+// favours specialties you've seen less. knownTopics: topics already read on
+// any device -> avoided when picking a new topic.
+let coverageCounts: Record<string, number> = {};
+let knownTopics: string[] = [];
+export const setStudyContext = (ctx: { coverage?: Record<string, number>; topics?: string[] }) => {
+  if (ctx.coverage) coverageCounts = ctx.coverage;
+  if (ctx.topics) knownTopics = ctx.topics;
+};
+
 // --- HISTORY TRACKING UTILS ---
 const HISTORY_KEY = 'medDaily_topicHistory';
 const HISTORY_LIMIT = 50;
@@ -31,7 +43,9 @@ const HISTORY_LIMIT = 50;
 const getHistory = (): string[] => {
   try {
     const stored = localStorage.getItem(HISTORY_KEY);
-    return stored ? JSON.parse(stored) : [];
+    const local: string[] = stored ? JSON.parse(stored) : [];
+    // merge with topics from synced history, newest first, no duplicates
+    return Array.from(new Set([...local, ...knownTopics])).slice(0, 80);
   } catch (e) {
     return [];
   }
@@ -54,8 +68,20 @@ const pickRandom = (list: SubCategory[]): SubCategory => {
     c !== SubCategory.RANDOM &&
     c !== SubCategory.INTERNAL_MEDICINE_GENERAL
   );
-  return cleanList[Math.floor(Math.random() * cleanList.length)];
+  // Weighted random: a specialty read n times in the last 2 weeks gets weight 1/(1+n)
+  const weights = cleanList.map(c => 1 / (1 + (coverageCounts[c] || 0)));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < cleanList.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return cleanList[i];
+  }
+  return cleanList[cleanList.length - 1];
 };
+
+const SPECIALTY_VALUES: string[] = Object.values(SubCategory).filter(v =>
+  v !== SubCategory.OTHER_GENERAL && v !== SubCategory.RANDOM && v !== SubCategory.INTERNAL_MEDICINE_GENERAL
+);
 
 // --- AUDIENCE LEVEL ---
 // Internal medicine subspecialties (and clinical pharmacology) are written at
@@ -168,6 +194,23 @@ const STUDY_CARD_TOOL = {
       title: { type: "string", description: "Title in the requested language" },
       markdownBody: { type: "string", description: "The full study content, in Markdown" },
       topic: { type: "string", description: "Specific topic name in English (used for history/dedup)" },
+      specialty: { type: "string", enum: SPECIALTY_VALUES, description: "The single specialty this card belongs to" },
+      keyPoints: {
+        type: "array",
+        items: { type: "string" },
+        description: "2-3 one-line takeaways in the card's language (the facts to remember)"
+      },
+      recall: {
+        type: "object",
+        description: "One O/X recall question for spaced review, in the card's language.",
+        properties: {
+          fact: { type: "string", description: "The correct key fact from this card that the question tests" },
+          statement: { type: "string", description: "Self-contained true/false statement (name the disease/drug/test; never 'this study'). About half the time make it false by changing ONE key detail plausibly (a number, criterion, first-line drug, direction of effect)." },
+          explanation: { type: "string", description: "1-2 sentences stating the correct fact and why" },
+          isTrue: { type: "boolean", description: "Whether the statement is true. Decide this last, after checking it against fact." }
+        },
+        required: ["fact", "statement", "explanation", "isTrue"]
+      },
       sources: {
         type: "array",
         items: {
@@ -195,7 +238,7 @@ const STUDY_CARD_TOOL = {
         description: "OPTIONAL Mermaid flowchart source (starting with 'flowchart TD') ONLY when the topic has a real decision algorithm or stepwise pathway; otherwise an empty string. Max 12 nodes. Every node label must be in double quotes, e.g. A[\"Suspected PE\"] --> B{\"Wells > 4?\"}. Labels in the card's language. No styling, no subgraphs."
       }
     },
-    required: ["title", "markdownBody", "topic", "sources", "suggestedTopics", "imageQueries"]
+    required: ["title", "markdownBody", "topic", "specialty", "keyPoints", "recall", "sources", "suggestedTopics", "imageQueries"]
   }
 };
 
@@ -375,7 +418,12 @@ function stripCitationMarkup(text: string): string {
   return text.replace(/<cite[^>]*>/gi, "").replace(/<\/cite>/gi, "");
 }
 
-function toStudyContent(input: any, language: Language): StudyContent {
+function toRecall(r: any): RecallQuestion | undefined {
+  if (!r || typeof r.statement !== "string" || !r.statement.trim() || typeof r.isTrue !== "boolean") return undefined;
+  return { statement: r.statement.trim(), isTrue: r.isTrue, explanation: String(r.explanation || r.fact || "").trim() };
+}
+
+function toStudyContent(input: any, language: Language, length?: StudyLength): StudyContent {
   const sources: Source[] = [];
   const seen = new Set<string>();
   if (Array.isArray(input.sources)) {
@@ -394,6 +442,15 @@ function toStudyContent(input: any, language: Language): StudyContent {
     });
   }
   return {
+    id: newId(),
+    createdAt: Date.now(),
+    language,
+    length,
+    specialty: SPECIALTY_VALUES.includes(input.specialty) ? input.specialty : undefined,
+    keyPoints: Array.isArray(input.keyPoints)
+      ? input.keyPoints.filter((k: any) => typeof k === "string" && k.trim()).slice(0, 3)
+      : [],
+    recall: toRecall(input.recall),
     title: input.title || (language === Language.KOREAN ? "의학 주제" : "Medical Topic"),
     content: stripCitationMarkup(input.markdownBody || "No content generated."),
     topic: input.topic || "General",
@@ -408,7 +465,7 @@ function toStudyContent(input: any, language: Language): StudyContent {
   };
 }
 
-const VISUALS_RULE = "Give 2-3 imageQueries (English) for real images of the key finding/lesion/test, from different angles. Add a Mermaid flowchart only if there is a genuine algorithm or pathway.";
+const VISUALS_RULE = "Give 2-3 imageQueries (English) for real images of the key finding/lesion/test, from different angles. Add a Mermaid flowchart only if there is a genuine algorithm or pathway. Fill keyPoints and the recall O/X question from the most important fact of this card.";
 
 // --- Main topic generator (7-sided diversity dice) ---
 export const generateMedicalTopic = async (
@@ -569,7 +626,8 @@ export const generateMedicalTopic = async (
 
   return withRetry(async () => {
     const toolInput = await callClaudeForStudyCard(system, prompt, opts);
-    const parsed = toStudyContent(toolInput, language);
+    const parsed = toStudyContent(toolInput, language, length);
+    parsed.specialty = targetCategory;
     if (parsed.topic && parsed.topic !== "General") addToHistory(parsed.topic);
     return parsed;
   });
@@ -606,7 +664,9 @@ export const generateTopicFromKeyword = async (
 
   return withRetry(async () => {
     const toolInput = await callClaudeForStudyCard(system, prompt, { searchMaxUses: 2, forceTool: false, effort: 'low', onDraft });
-    return toStudyContent(toolInput, language);
+    const parsed = toStudyContent(toolInput, language, length);
+    if (parsed.topic && parsed.topic !== "General") addToHistory(parsed.topic);
+    return parsed;
   });
 };
 
@@ -631,6 +691,163 @@ export const rewriteContent = async (
 
   return withRetry(async () => {
     const toolInput = await callClaudeForStudyCard(system, prompt, { forceTool: true, onDraft });
-    return toStudyContent(toolInput, language);
+    return toStudyContent(toolInput, language, length);
+  });
+};
+
+// ===================== SERIES (connected multi-part study) =====================
+
+const SERIES_PLAN_TOOL = {
+  name: "submit_series_plan",
+  description: "Submit the outline of a study series.",
+  input_schema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Series title in the requested language" },
+      specialty: { type: "string", enum: SPECIALTY_VALUES, description: "Main specialty of the series" },
+      parts: {
+        type: "array",
+        description: "Ordered parts. Each builds on the previous ones.",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Part title in the requested language" },
+            focus: { type: "string", description: "One sentence: what this part covers and how it builds on earlier parts" }
+          },
+          required: ["title", "focus"]
+        }
+      }
+    },
+    required: ["title", "specialty", "parts"]
+  }
+};
+
+async function callForcedTool(system: string, prompt: string, tool: any): Promise<any> {
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey || "",
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: MODEL_NAME,
+      max_tokens: 4000,
+      system,
+      messages: [{ role: "user", content: prompt }],
+      tools: [tool],
+      tool_choice: { type: "tool", name: tool.name }
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new ApiError(`Claude API error ${res.status}: ${errText}`, res.status);
+  }
+  const data = await res.json();
+  const toolUse = (data.content || []).find((b: any) => b.type === "tool_use" && b.name === tool.name);
+  if (!toolUse) throw new Error("Model did not return a plan");
+  return toolUse.input;
+}
+
+/**
+ * Plans a series: a short curriculum of `partCount` connected cards on a theme,
+ * ordered from foundations to applied/advanced points.
+ */
+export const planSeries = async (
+  theme: string,
+  partCount: number,
+  language: Language,
+  length: StudyLength
+): Promise<Series> => {
+  const system = `You are a senior medical educator designing a short, connected study series.\n${getAudience(null)}`;
+  const prompt = `
+    Theme: "${theme}"
+    Number of parts: ${partCount}
+
+    Design an ordered series where each part builds on the previous ones, e.g.
+    core concept/physiology → diagnosis → classification or differential → treatment → special situations → pitfalls and recent evidence.
+    Adapt this order to the theme. No overlap between parts; together they should cover the theme the way a specialist would want.
+
+    Language for title and part titles/focus:
+    ${getLanguageStyleGuide(language)}
+  `;
+  const input = await withRetry(() => callForcedTool(system, prompt, SERIES_PLAN_TOOL));
+  const parts: SeriesPart[] = (Array.isArray(input.parts) ? input.parts : [])
+    .filter((p: any) => p && typeof p.title === "string" && p.title.trim())
+    .slice(0, 10)
+    .map((p: any) => ({ title: p.title.trim(), focus: String(p.focus || "").trim() }));
+  if (parts.length < 2) throw new Error("Series plan was empty");
+  const now = Date.now();
+  return {
+    id: newId(),
+    title: String(input.title || theme).trim(),
+    theme,
+    specialty: SPECIALTY_VALUES.includes(input.specialty) ? input.specialty : undefined,
+    language,
+    length,
+    parts,
+    createdAt: now,
+    updatedAt: now
+  };
+};
+
+/**
+ * Writes part `index` of a series, using the outline and the key points of the
+ * parts already read so it continues from them instead of repeating them.
+ */
+export const generateSeriesPart = async (
+  series: Series,
+  index: number,
+  previousCards: StudyContent[],
+  onDraft?: DraftHandler
+): Promise<StudyContent> => {
+  const part = series.parts[index];
+  const outline = series.parts
+    .map((p, i) => `${i + 1}. ${p.title} — ${p.focus}${i === index ? "   <== WRITE THIS PART" : ""}`)
+    .join("\n");
+  const covered = previousCards
+    .filter(c => typeof c.seriesIndex === "number" && c.seriesIndex < index)
+    .sort((a, b) => (a.seriesIndex as number) - (b.seriesIndex as number))
+    .map(c => `Part ${(c.seriesIndex as number) + 1} (${c.title}):\n${(c.keyPoints || []).map(k => `- ${k}`).join("\n")}`)
+    .join("\n\n");
+
+  const category = (series.specialty && SPECIALTY_VALUES.includes(series.specialty))
+    ? series.specialty as SubCategory : null;
+  const system = `You are a senior medical educator writing one part of a connected study series.\n${getAudience(category)}\n${QUALITY_RULES}`;
+  const prompt = `
+    Series: "${series.title}" (${series.parts.length} parts)
+    Outline:
+    ${outline}
+
+    ${covered ? `Already covered in earlier parts (do not repeat; build on it, referring back briefly where useful):\n${covered}` : "This is the first part: lay the foundation the later parts will build on."}
+
+    Now write part ${index + 1}: "${part.title}" — ${part.focus}
+    Use the part title as the card title. End with one line previewing what the next part covers${index === series.parts.length - 1 ? " (this is the last part: instead, end with a short wrap-up of the whole series)" : ""}.
+
+    Language:
+    ${getLanguageStyleGuide(series.language)}
+
+    Length: ${getLengthInstruction(series.length)}
+
+    Requirements:
+    1. Rely on well-established medical knowledge.
+    2. Suggest 3 related topics.
+    3. ${VISUALS_RULE}
+  `;
+
+  const opts: CallOptions = series.length === StudyLength.DETAILED
+    ? { forceTool: false, effort: 'medium', onDraft }
+    : { forceTool: true, onDraft };
+
+  return withRetry(async () => {
+    const toolInput = await callClaudeForStudyCard(system, prompt, opts);
+    const parsed = toStudyContent(toolInput, series.language, series.length);
+    parsed.seriesId = series.id;
+    parsed.seriesIndex = index;
+    parsed.seriesTitle = series.title;
+    if (category) parsed.specialty = category;
+    if (parsed.topic && parsed.topic !== "General") addToHistory(parsed.topic);
+    return parsed;
   });
 };

@@ -1,23 +1,48 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# MedDaily
 
-# Run and deploy your AI Studio app
+Personal, mobile-first medical study app: short evidence-based cards across
+specialties, generated with Claude, with history, spaced-repetition review,
+specialty-balance tracking and multi-part study series synced through Firebase.
 
-This contains everything you need to run your app locally.
+## Environment variables (Vercel → Settings → Environment Variables)
 
-View your app in AI Studio: https://ai.studio/apps/c8ee74be-27d8-45c9-8f16-0bb030cbc883
+```
+VITE_ANTHROPIC_API_KEY=sk-ant-...
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=<project-id>.firebaseapp.com
+VITE_FIREBASE_PROJECT_ID=<project-id>
+VITE_FIREBASE_APP_ID=...
+```
 
-## Run Locally
+Without the `VITE_FIREBASE_*` values the app still works, but history, review
+and series are saved on the current device only.
 
-**Prerequisites:**  Node.js
+## Firebase setup (once)
 
+MedDaily can share an existing Firebase project (e.g. MediNote's) or use its own.
+It only ever touches its own collections: `meddaily_cards` (every card read,
+with its recall question and review progress) and `meddaily_series`.
 
-1. Install dependencies:
-   `npm install`
-2. Set `VITE_ANTHROPIC_API_KEY` in `.env.local` to your Anthropic API key
-   (get one at https://platform.claude.com — for local testing only; before
-   deploying, this call should move behind a serverless function so the key
-   is never shipped to the browser)
-3. Run the app:
-   `npm run dev`
+1. Use the project's Web app config (`apiKey`, `authDomain`, `projectId`,
+   `appId`) for the variables above. Keep them in Vercel env vars, not in the repo.
+2. Authentication → Sign-in method → **Anonymous** must be enabled
+   (already on if MediNote uses the same project).
+3. Firestore Database → Rules: **add** these two blocks inside the existing
+   `match /databases/{database}/documents { ... }` — do not replace the rules
+   other apps rely on:
+
+```
+    match /meddaily_cards/{docId} {
+      allow read, write: if request.auth != null;
+    }
+    match /meddaily_series/{docId} {
+      allow read, write: if request.auth != null;
+    }
+```
+
+## Run locally
+
+1. `npm install`
+2. Put the variables above in `.env.local`
+3. `npm run dev` (the image search endpoint in `api/` runs only with `vercel dev`;
+   plain `npm run dev` falls back to Wikimedia Commons)

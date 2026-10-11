@@ -57,7 +57,53 @@ export interface Source {
   uri: string;
 }
 
+// One O/X statement used for spaced-repetition recall of a card
+export interface RecallQuestion {
+  statement: string;
+  isTrue: boolean;
+  explanation: string;
+}
+
+// Spaced-repetition state for a card's recall question
+export interface ReviewState {
+  stage: number;          // index into REVIEW_INTERVALS_DAYS
+  dueAt: number | null;   // ms timestamp; null = finished
+  lastAnsweredAt?: number;
+  correct: number;
+  wrong: number;
+}
+
+export interface SeriesPart {
+  title: string;
+  focus: string;
+  cardId?: string;        // set once this part has been generated and read
+}
+
+export interface Series {
+  id: string;
+  title: string;          // display title in the chosen language
+  theme: string;          // what the user typed
+  specialty?: string;
+  language: Language;
+  length: StudyLength;
+  parts: SeriesPart[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface StudyContent {
+  id?: string;
+  createdAt?: number;
+  readAt?: number;        // set when first shown; saved cards always have it
+  specialty?: string;     // SubCategory value
+  language?: Language;
+  length?: StudyLength;
+  keyPoints?: string[];   // 2-3 one-line takeaways (used for history + series context)
+  recall?: RecallQuestion;
+  review?: ReviewState;
+  seriesId?: string;
+  seriesIndex?: number;
+  seriesTitle?: string;
   title: string;
   content: string; // Markdown formatted text
   sources: Source[];
