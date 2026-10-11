@@ -1,32 +1,29 @@
 import React, { useState } from 'react';
 import { Language, StudyContent } from '../types';
-import { dueCards } from '../services/review';
+import { dueItems, upcomingItems, ReviewItem } from '../services/review';
 import { labelsFor, formatDate } from './labels';
 
 interface ReviewViewProps {
   cards: StudyContent[];
   language: Language;
-  onAnswer: (card: StudyContent, correct: boolean) => void;
-  onOpenCard: (card: StudyContent) => void;
+  onAnswer: (item: ReviewItem, correct: boolean) => void;
+  onOpenCard: (card: StudyContent, openChat?: boolean) => void;
 }
 
 export const ReviewView: React.FC<ReviewViewProps> = ({ cards, language, onAnswer, onOpenCard }) => {
   const L = labelsFor(language);
   // Freeze the queue when the session starts so answered questions don't
   // disappear from under the user while the explanation is shown.
-  const [queue, setQueue] = useState<StudyContent[] | null>(null);
+  const [queue, setQueue] = useState<ReviewItem[] | null>(null);
   const [index, setIndex] = useState(0);
   const [picked, setPicked] = useState<boolean | null>(null);
   const [score, setScore] = useState(0);
 
-  const due = dueCards(cards);
-  const upcoming = cards
-    .filter(c => c.recall && c.review && c.review.dueAt !== null && c.review.dueAt > Date.now())
-    .sort((a, b) => (a.review!.dueAt as number) - (b.review!.dueAt as number));
+  const due = dueItems(cards);
+  const upcoming = upcomingItems(cards);
 
   const start = () => { setQueue(due); setIndex(0); setPicked(null); setScore(0); };
 
-  // Not started (or finished)
   if (!queue) {
     return (
       <div className="bg-white rounded-2xl border border-slate-100 p-6 text-center">
@@ -40,7 +37,7 @@ export const ReviewView: React.FC<ReviewViewProps> = ({ cards, language, onAnswe
           <>
             <p className="text-slate-500">{L.noReview}</p>
             {upcoming[0] && (
-              <p className="text-xs text-slate-400 mt-2">{L.nextReview(formatDate(upcoming[0].review!.dueAt as number, language))}</p>
+              <p className="text-xs text-slate-400 mt-2">{L.nextReview(formatDate(upcoming[0].review.dueAt as number, language))}</p>
             )}
           </>
         )}
@@ -54,15 +51,15 @@ export const ReviewView: React.FC<ReviewViewProps> = ({ cards, language, onAnswe
         <h2 className="text-lg font-bold text-slate-800 mb-2">{L.reviewTitle}</h2>
         <p className="text-slate-700">{L.reviewSummary(score, queue.length)}</p>
         {upcoming[0] && (
-          <p className="text-xs text-slate-400 mt-2">{L.nextReview(formatDate(upcoming[0].review!.dueAt as number, language))}</p>
+          <p className="text-xs text-slate-400 mt-2">{L.nextReview(formatDate(upcoming[0].review.dueAt as number, language))}</p>
         )}
         <button onClick={() => setQueue(null)} className="mt-5 w-full py-3 rounded-xl border border-slate-200 text-slate-700">OK</button>
       </div>
     );
   }
 
-  const card = queue[index];
-  const q = card.recall!;
+  const item = queue[index];
+  const q = item.recall;
   const isCorrect = picked !== null && picked === q.isTrue;
 
   const answer = (choice: boolean) => {
@@ -70,7 +67,7 @@ export const ReviewView: React.FC<ReviewViewProps> = ({ cards, language, onAnswe
     setPicked(choice);
     const ok = choice === q.isTrue;
     if (ok) setScore(s => s + 1);
-    onAnswer(card, ok);
+    onAnswer(item, ok);
   };
 
   return (
@@ -81,9 +78,15 @@ export const ReviewView: React.FC<ReviewViewProps> = ({ cards, language, onAnswe
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 p-6">
-        <p className="text-xs text-slate-400 mb-1">{card.specialty}</p>
-        <p className="text-xs font-semibold text-slate-500 mb-4">{card.title}</p>
-        <p className="text-lg text-slate-900 leading-relaxed">{q.statement}</p>
+        <div className="flex items-center gap-1.5 mb-1">
+          {item.card.specialty && <span className="text-xs text-slate-400">{item.card.specialty}</span>}
+          {item.chatAt !== undefined && (
+            <span className="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10px]">{L.fromChat}</span>
+          )}
+        </div>
+        <p className="text-xs font-semibold text-slate-500 mb-1">{item.card.title}</p>
+        {item.question && <p className="text-xs text-slate-400 mb-4 line-clamp-2">Q. {item.question}</p>}
+        <p className="text-lg text-slate-900 leading-relaxed mt-3">{q.statement}</p>
 
         <div className="grid grid-cols-2 gap-3 mt-6">
           {[true, false].map(choice => {
@@ -113,7 +116,9 @@ export const ReviewView: React.FC<ReviewViewProps> = ({ cards, language, onAnswe
             </p>
             {q.explanation && <p className="text-sm text-slate-700 mt-2 leading-relaxed">{q.explanation}</p>}
             <div className="grid grid-cols-2 gap-3 mt-5">
-              <button onClick={() => onOpenCard(card)} className="py-2.5 rounded-xl border border-slate-200 text-sm text-slate-700">{L.openCard}</button>
+              <button onClick={() => onOpenCard(item.card, item.chatAt !== undefined)} className="py-2.5 rounded-xl border border-slate-200 text-sm text-slate-700">
+                {item.chatAt !== undefined ? L.openChat : L.openCard}
+              </button>
               <button onClick={() => { setIndex(index + 1); setPicked(null); }} className="py-2.5 rounded-xl bg-slate-800 text-white text-sm">{L.next}</button>
             </div>
           </div>

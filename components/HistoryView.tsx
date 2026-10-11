@@ -133,6 +133,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ cards, language, sync,
                       {card.specialty && <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px]">{card.specialty}</span>}
                       {card.seriesTitle && <span className="px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 text-[10px]">{card.seriesTitle} {typeof card.seriesIndex === 'number' ? `#${card.seriesIndex + 1}` : ''}</span>}
                       {reviewText && <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px]">{reviewText}</span>}
+                      {card.chat && card.chat.some(m => m.role === 'user') && (
+                        <span className="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10px]">{L.chatCount(card.chat.filter(m => m.role === 'user').length)}</span>
+                      )}
                     </div>
                   </button>
                   <button

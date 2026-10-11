@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DEFAULT_CATEGORY } from './constants';
-import { SubCategory, StudyContent, Language, StudyLength, Series } from './types';
+import { SubCategory, StudyContent, Language, StudyLength, Series, ChatMessage } from './types';
 import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword, DraftHandler, setStudyContext, planSeries, generateSeriesPart } from './services/claudeService';
 import { store, type SyncStatus } from './services/store';
 import { newId } from './services/id';
-import { initialReview, answerReview, dueCards, countBySpecialty } from './services/review';
+import { initialReview, answerReview, dueItems, countBySpecialty, ReviewItem } from './services/review';
+import { ChatPanel } from './components/ChatPanel';
 import { BottomNav, View } from './components/BottomNav';
 import { HistoryView } from './components/HistoryView';
 import { ReviewView } from './components/ReviewView';
@@ -65,7 +66,10 @@ const App: React.FC = () => {
     });
   }, [cards]);
 
-  const dueCount = dueCards(cards).length;
+  const dueCount = dueItems(cards).length;
+
+  // --- Q&A about the current card ---
+  const [chatOpen, setChatOpen] = useState(false);
   
   // Main Loading State (Blocking)
   const [loading, setLoading] = useState(false);
@@ -428,25 +432,48 @@ const App: React.FC = () => {
       seriesId: prev.seriesId,
       seriesIndex: prev.seriesIndex,
       seriesTitle: prev.seriesTitle,
+      chat: saved?.chat ?? prev.chat,
     };
     if (prev.id && merged.readAt) {
-      const { id, createdAt, readAt, review, ...contentFields } = merged;
+      const { id, createdAt, readAt, review, chat, ...contentFields } = merged;
       store.updateCard(prev.id, contentFields).catch(e => console.warn('Update failed', e));
     }
     return merged;
   };
 
   // --- History / review / series actions ---
-  const openCard = (card: StudyContent) => {
+  const openCard = (card: StudyContent, openChat = false) => {
     setCurrentContent(card);
     setView('study');
+    setChatOpen(openChat);
     window.scrollTo({ top: 0 });
   };
 
-  const handleReviewAnswer = (card: StudyContent, correct: boolean) => {
+  // Saves the conversation on the card (making sure the card is in history first)
+  const persistChat = async (card: StudyContent, messages: ChatMessage[]) => {
     if (!card.id) return;
-    store.updateCard(card.id, { review: answerReview(card.review, correct) })
-      .catch(e => console.warn('Review update failed', e));
+    const now = Date.now();
+    await store.saveCardIfNew({
+      ...card,
+      readAt: card.readAt ?? now,
+      review: card.review ?? (card.recall ? initialReview(now) : undefined)
+    });
+    await store.updateCard(card.id, { chat: messages });
+  };
+
+  const handleReviewAnswer = (item: ReviewItem, correct: boolean) => {
+    const id = item.card.id;
+    if (!id) return;
+    if (item.chatAt !== undefined) {
+      // a question made from a Q&A answer: update that message inside the card's chat
+      const latest = cards.find(c => c.id === id) ?? item.card;
+      const chat = (latest.chat || []).map(m =>
+        m.at === item.chatAt && m.role === 'assistant' ? { ...m, review: answerReview(m.review, correct) } : m);
+      store.updateCard(id, { chat }).catch(e => console.warn('Review update failed', e));
+    } else {
+      store.updateCard(id, { review: answerReview(item.review, correct) })
+        .catch(e => console.warn('Review update failed', e));
+    }
   };
 
   const handleCreateSeries = async (theme: string, partCount: number) => {
@@ -481,6 +508,8 @@ const App: React.FC = () => {
 
   const L = labelsFor(activeLanguage);
   const currentSeries = currentContent?.seriesId ? seriesList.find(x => x.id === currentContent.seriesId) : undefined;
+  const savedCurrent = currentContent?.id ? cards.find(c => c.id === currentContent.id) : undefined;
+  const currentChat: ChatMessage[] = savedCurrent?.chat ?? currentContent?.chat ?? [];
 
   return (
     <div className="min-h-screen bg-slate-50 pb-28 relative">
@@ -590,6 +619,12 @@ const App: React.FC = () => {
               
               {/* Length Selector & Refresh */}
               <div className="flex flex-wrap justify-end mb-4 items-center gap-2">
+                 <button
+                    onClick={() => setChatOpen(true)}
+                    className="not-prose mr-auto px-3 py-1.5 rounded-full bg-teal-50 text-teal-700 text-xs font-semibold border border-teal-100"
+                 >
+                   {L.askTitle}{currentChat.length ? ` · ${currentChat.filter(m => m.role === 'user').length}` : ''}
+                 </button>
                  
                  <button 
                     onClick={handleRegenerate}
@@ -652,6 +687,13 @@ const App: React.FC = () => {
               </div>
 
               {currentContent.flowchart && <Flowchart code={currentContent.flowchart} />}
+
+              <button
+                onClick={() => setChatOpen(true)}
+                className="not-prose mt-8 w-full py-3 px-4 rounded-xl border border-teal-200 bg-teal-50 text-teal-800 text-sm font-semibold text-left"
+              >
+                {L.askButton}{currentChat.length ? ` · ${L.chatCount(currentChat.filter(m => m.role === 'user').length)}` : ''} →
+              </button>
 
               {currentSeries && typeof currentContent.seriesIndex === 'number' && currentContent.seriesIndex + 1 < currentSeries.parts.length && (
                 <button
@@ -764,6 +806,17 @@ const App: React.FC = () => {
         </div>
       )}
       
+      {chatOpen && currentContent && view === 'study' && (
+        <ChatPanel
+          key={currentContent.id}
+          card={currentContent}
+          savedChat={currentChat}
+          language={activeLanguage}
+          onPersist={(messages) => persistChat(currentContent, messages)}
+          onClose={() => setChatOpen(false)}
+        />
+      )}
+
       <BottomNav view={view} onChange={(v) => { setView(v); window.scrollTo({ top: 0 }); }} dueCount={dueCount} language={activeLanguage} />
 
       <SettingsModal 

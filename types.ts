@@ -55,6 +55,21 @@ export enum SubCategory {
 export interface Source {
   title: string;
   uri: string;
+  snippet?: string;   // short cited excerpt (chat answers)
+}
+
+// One message of the Q&A conversation attached to a card (MediNote-style)
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  at: number;
+  text: string;
+  mode?: 'fast' | 'full';     // assistant: how deeply it answered
+  sources?: Source[];         // assistant: cited sources, order = [n] numbers
+  seen?: Source[];            // assistant: searched but not cited
+  queries?: string[];         // assistant: search queries used
+  followups?: string[];       // assistant: suggested next questions
+  recall?: RecallQuestion;    // assistant: O/X review question made from this answer
+  review?: ReviewState;
 }
 
 // One O/X statement used for spaced-repetition recall of a card
@@ -104,6 +119,7 @@ export interface StudyContent {
   seriesId?: string;
   seriesIndex?: number;
   seriesTitle?: string;
+  chat?: ChatMessage[];   // questions asked about this card and their answers
   title: string;
   content: string; // Markdown formatted text
   sources: Source[];

@@ -1,4 +1,4 @@
-import { ReviewState, StudyContent } from '../types';
+import { ReviewState, StudyContent, RecallQuestion } from '../types';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -31,14 +31,45 @@ export function answerReview(prev: ReviewState | undefined, correct: boolean, no
   };
 }
 
-export function isDue(card: StudyContent, now: number = Date.now()): boolean {
-  return !!card.recall && !!card.review && card.review.dueAt !== null && card.review.dueAt <= now;
+// A review question comes either from the card itself or from one answer in
+// the card's Q&A conversation (chatAt = that answer's timestamp).
+export interface ReviewItem {
+  key: string;
+  card: StudyContent;
+  chatAt?: number;
+  question?: string;      // the question that was asked (chat items)
+  recall: RecallQuestion;
+  review: ReviewState;
 }
 
-export function dueCards(cards: StudyContent[], now: number = Date.now()): StudyContent[] {
-  return cards
-    .filter(c => isDue(c, now))
-    .sort((a, b) => (a.review!.dueAt as number) - (b.review!.dueAt as number));
+export function reviewItems(cards: StudyContent[]): ReviewItem[] {
+  const items: ReviewItem[] = [];
+  for (const card of cards) {
+    if (card.recall && card.review) {
+      items.push({ key: `${card.id}`, card, recall: card.recall, review: card.review });
+    }
+    const chat = card.chat || [];
+    chat.forEach((m, i) => {
+      if (m.role !== 'assistant' || !m.recall || !m.review) return;
+      const q = [...chat.slice(0, i)].reverse().find(x => x.role === 'user');
+      items.push({ key: `${card.id}:${m.at}`, card, chatAt: m.at, question: q?.text, recall: m.recall, review: m.review });
+    });
+  }
+  return items;
+}
+
+const isItemDue = (it: ReviewItem, now: number) => it.review.dueAt !== null && it.review.dueAt <= now;
+
+export function dueItems(cards: StudyContent[], now: number = Date.now()): ReviewItem[] {
+  return reviewItems(cards)
+    .filter(it => isItemDue(it, now))
+    .sort((a, b) => (a.review.dueAt as number) - (b.review.dueAt as number));
+}
+
+export function upcomingItems(cards: StudyContent[], now: number = Date.now()): ReviewItem[] {
+  return reviewItems(cards)
+    .filter(it => it.review.dueAt !== null && it.review.dueAt > now)
+    .sort((a, b) => (a.review.dueAt as number) - (b.review.dueAt as number));
 }
 
 // How many cards per specialty were read in the last `days` days.
