@@ -1,18 +1,19 @@
 import { MedicalImage } from "../types";
 
-const MAX_TOTAL = 6;
+export const BATCH_SIZE = 3;
 
 /**
  * Fallback used when /api/images isn't available (e.g. plain `npm run dev`
  * without Vercel). Wikimedia Commons allows browser calls with origin=*.
  */
-async function searchCommonsDirect(q: string): Promise<MedicalImage[]> {
+async function searchCommonsDirect(q: string, page: number): Promise<MedicalImage[]> {
   const params = new URLSearchParams({
     action: "query",
     generator: "search",
     gsrnamespace: "6",
     gsrsearch: `${q} filetype:bitmap`,
-    gsrlimit: "6",
+    gsrlimit: "8",
+    gsroffset: String(page * 8),
     prop: "imageinfo",
     iiprop: "url|extmetadata",
     iiurlwidth: "640",
@@ -45,9 +46,9 @@ async function searchCommonsDirect(q: string): Promise<MedicalImage[]> {
     .slice(0, 4);
 }
 
-async function searchOne(q: string): Promise<MedicalImage[]> {
+async function searchOne(q: string, page: number): Promise<MedicalImage[]> {
   try {
-    const res = await fetch(`/api/images?q=${encodeURIComponent(q)}`);
+    const res = await fetch(`/api/images?q=${encodeURIComponent(q)}&page=${page}`);
     const type = res.headers.get("content-type") || "";
     if (res.ok && type.includes("application/json")) {
       const data = await res.json();
@@ -57,27 +58,32 @@ async function searchOne(q: string): Promise<MedicalImage[]> {
     // fall through to direct Commons search
   }
   try {
-    return await searchCommonsDirect(q);
+    return await searchCommonsDirect(q, page);
   } catch (e) {
     return [];
   }
 }
 
 /**
- * Runs each query (in parallel) and merges results, de-duplicating by image URL.
+ * Searches all queries for one page (in parallel) and returns up to BATCH_SIZE
+ * new images, skipping any already shown. Results from different queries are
+ * interleaved so each query contributes its best hit first.
  */
-export async function fetchMedicalImages(queries: string[]): Promise<MedicalImage[]> {
+export async function fetchMedicalImages(
+  queries: string[],
+  page: number,
+  exclude: Set<string>
+): Promise<MedicalImage[]> {
   const clean = queries.map(q => q.trim()).filter(Boolean).slice(0, 3);
   if (clean.length === 0) return [];
-  const results = await Promise.all(clean.map(searchOne));
-  const seen = new Set<string>();
+  const results = await Promise.all(clean.map(q => searchOne(q, page)));
+  const seen = new Set(exclude);
   const merged: MedicalImage[] = [];
-  // interleave so each query contributes its best hit first
   const maxLen = Math.max(...results.map(r => r.length), 0);
-  for (let i = 0; i < maxLen && merged.length < MAX_TOTAL; i++) {
+  for (let i = 0; i < maxLen && merged.length < BATCH_SIZE; i++) {
     for (const list of results) {
       const img = list[i];
-      if (img && !seen.has(img.full) && merged.length < MAX_TOTAL) {
+      if (img && !seen.has(img.full) && merged.length < BATCH_SIZE) {
         seen.add(img.full);
         merged.push(img);
       }

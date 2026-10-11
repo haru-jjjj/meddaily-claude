@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DEFAULT_CATEGORY } from './constants';
 import { SubCategory, StudyContent, Language, StudyLength } from './types';
-import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword } from './services/claudeService';
+import { generateMedicalTopic, rewriteContent, generateTopicFromKeyword, DraftHandler } from './services/claudeService';
 import { Button } from './components/Button';
 import { Loading } from './components/Loading';
 import { SourceList } from './components/SourceList';
@@ -12,6 +12,21 @@ import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
+
+const markdownComponents: any = {
+  h1: ({node, ...props}: any) => <h2 className="text-2xl font-bold text-slate-800 mt-8 mb-4" {...props} />,
+  h2: ({node, ...props}: any) => <h3 className="text-xl font-semibold text-slate-800 mt-6 mb-3" {...props} />,
+  h3: ({node, ...props}: any) => <h4 className="text-lg font-medium text-slate-800 mt-4 mb-2" {...props} />,
+  p: ({node, ...props}: any) => <p className="mb-4 text-lg" {...props} />,
+  ul: ({node, ...props}: any) => <ul className="list-disc pl-5 mb-4 space-y-2" {...props} />,
+  li: ({node, ...props}: any) => <li className="pl-1" {...props} />,
+  strong: ({node, ...props}: any) => <strong className="font-semibold text-slate-900" {...props} />,
+  blockquote: ({node, ...props}: any) => <blockquote className="border-l-4 border-blue-500 pl-4 py-1 italic bg-slate-50 text-slate-600 rounded-r-lg my-6" {...props} />,
+  table: ({node, ...props}: any) => <div className="overflow-x-auto mb-6"><table className="min-w-full border-collapse border border-slate-200" {...props} /></div>,
+  thead: ({node, ...props}: any) => <thead className="bg-slate-50" {...props} />,
+  th: ({node, ...props}: any) => <th className="border border-slate-200 px-4 py-2 text-left font-semibold text-slate-700 text-sm whitespace-nowrap" {...props} />,
+  td: ({node, ...props}: any) => <td className="border border-slate-200 px-4 py-2 text-sm text-slate-600" {...props} />,
+};
 
 const App: React.FC = () => {
   const [hasStarted, setHasStarted] = useState(false);
@@ -28,6 +43,37 @@ const App: React.FC = () => {
   // Ref to track fetch operations and handle race conditions (overrides)
   const fetchIdRef = useRef(0);
   const isPrefetching = useRef(false); // Keeps track if auto-prefetch specifically is running
+
+  // Streaming draft shown while a blocking (on-screen) generation is in progress
+  const [draft, setDraft] = useState<{ title: string; body: string } | null>(null);
+  const blockingIdRef = useRef(0);
+  const makeDraftHandler = (id: number): DraftHandler => (d) => {
+    if (id === blockingIdRef.current) setDraft(d);
+  };
+
+  // Runs a generation that the user is waiting for: shows the text as it is
+  // written, and drops the result if the user cancelled in the meantime.
+  const runBlocking = async (
+    generate: (onDraft: DraftHandler) => Promise<StudyContent>,
+    errorMessage: string
+  ) => {
+    const id = ++blockingIdRef.current;
+    setDraft(null);
+    setLoading(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    try {
+      const content = await generate(makeDraftHandler(id));
+      if (id === blockingIdRef.current) setCurrentContent(content);
+    } catch (error) {
+      console.error(error);
+      if (id === blockingIdRef.current) alert(errorMessage);
+    } finally {
+      if (id === blockingIdRef.current) {
+        setLoading(false);
+        setDraft(null);
+      }
+    }
+  };
 
   // Settings State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -176,6 +222,9 @@ const App: React.FC = () => {
       // topic the same way the normal "next topic" prefetch works: into
       // nextContent, so it only replaces what's on screen once the user
       // taps "Open Next Topic" — never mid-read.
+      // Mark as prefetching so the auto-prefetch effect doesn't start a
+      // second, duplicate request for the same slot.
+      isPrefetching.current = true;
       setCurrentContent(cachedContent);
       const myId = ++fetchIdRef.current;
       setBackgroundLoading(true);
@@ -187,6 +236,7 @@ const App: React.FC = () => {
       } catch (error) {
         console.warn("Initial background generation failed", error);
       } finally {
+        isPrefetching.current = false;
         if (myId === fetchIdRef.current) setBackgroundLoading(false);
       }
     } else {
@@ -216,6 +266,14 @@ const App: React.FC = () => {
     // 2. Decide: Blocking vs Background
     const runInBackground = !forceBlocking && currentContent !== null;
     let myId = 0;
+
+    if (!runInBackground) {
+      await runBlocking(
+        (onDraft) => generateMedicalTopic(category, isRandom, language, studyLength, forceResearch, onDraft),
+        "Failed to load topic. Please check your connection and API key."
+      );
+      return;
+    }
 
     if (runInBackground) {
         if (backgroundLoading && isPrefetching.current) {
@@ -253,44 +311,16 @@ const App: React.FC = () => {
   };
 
   const handleKeywordClick = async (keyword: string) => {
-    const runInBackground = currentContent !== null;
-    let myId = 0;
-
-    if (runInBackground) {
-        myId = ++fetchIdRef.current;
-        setBackgroundLoading(true);
-        setNextContent(null); 
-        
-        try {
-             const content = await generateTopicFromKeyword(keyword, activeLanguage, activeLength);
-             if (myId === fetchIdRef.current) {
-                 setNextContent(content);
-             }
-        } catch (error) {
-             console.error(error);
-             alert("Failed to load topic from keyword.");
-        } finally {
-             if (myId === fetchIdRef.current) {
-                 setBackgroundLoading(false);
-             }
-        }
-    } else {
-        setLoading(true);
-        try {
-          const content = await generateTopicFromKeyword(keyword, activeLanguage, activeLength);
-          setCurrentContent(content);
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        } catch (error) {
-          console.error(error);
-          alert("Failed to load topic from keyword.");
-        } finally {
-          setLoading(false);
-        }
-    }
+    await runBlocking(
+      (onDraft) => generateTopicFromKeyword(keyword, activeLanguage, activeLength, onDraft),
+      "Failed to load topic from keyword."
+    );
   };
 
   const handleStopGeneration = () => {
     fetchIdRef.current += 1; 
+    blockingIdRef.current += 1;
+    setDraft(null);
     isPrefetching.current = false;
     setBackgroundLoading(false);
     setLoading(false); 
@@ -300,36 +330,22 @@ const App: React.FC = () => {
   const handleChangeLength = async (newLength: StudyLength) => {
     if (!currentContent) return;
     if (newLength === activeLength) return;
-
-    setLoading(true);
+    const topic = currentContent.topic;
     setActiveLength(newLength);
-    setNextContent(null); 
-
-    try {
-      // Basic rewrite uses Flash by default
-      const newContent = await rewriteContent(currentContent.topic, newLength, activeLanguage);
-      setCurrentContent(newContent);
-    } catch (error) {
-      console.error(error);
-      alert("Failed to rewrite content. Please try again.");
-    } finally {
-      setLoading(false);
-    }
+    setNextContent(null);
+    await runBlocking(
+      (onDraft) => rewriteContent(topic, newLength, activeLanguage, onDraft),
+      "Failed to rewrite content. Please try again."
+    );
   };
 
   const handleRegenerate = async () => {
     if (!currentContent) return;
-    setLoading(true);
-
-    try {
-      const newContent = await rewriteContent(currentContent.topic, activeLength, activeLanguage);
-      setCurrentContent(newContent);
-    } catch (error) {
-      console.error(error);
-      alert("Failed to regenerate content.");
-    } finally {
-      setLoading(false);
-    }
+    const topic = currentContent.topic;
+    await runBlocking(
+      (onDraft) => rewriteContent(topic, activeLength, activeLanguage, onDraft),
+      "Failed to regenerate content."
+    );
   };
 
   if (!hasStarted) {
@@ -408,7 +424,30 @@ const App: React.FC = () => {
 
       {/* Content Area */}
       <main className="max-w-3xl mx-auto p-4 md:p-8">
-        {loading ? (
+        {loading && draft && draft.body ? (
+          <article className="bg-white p-6 md:p-10 rounded-2xl shadow-sm border border-slate-100 prose prose-slate prose-blue max-w-none relative">
+            <div className="not-prose flex items-center justify-between mb-4">
+              <span className="inline-flex items-center gap-2 text-xs font-semibold text-blue-600">
+                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+                {activeLanguage === Language.KOREAN ? '작성 중...' : activeLanguage === Language.JAPANESE ? '作成中...' : 'Writing...'}
+              </span>
+              <button
+                onClick={handleStopGeneration}
+                className="px-3 py-1 bg-red-100 text-red-600 text-xs rounded-full hover:bg-red-200 transition-colors font-medium border border-red-200"
+              >
+                Cancel
+              </button>
+            </div>
+            {draft.title && (
+              <h1 className="text-3xl font-extrabold text-slate-900 mb-6 leading-tight">{draft.title}</h1>
+            )}
+            <div className="text-slate-700 leading-relaxed space-y-4">
+              <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]} components={markdownComponents}>
+                {draft.body}
+              </ReactMarkdown>
+            </div>
+          </article>
+        ) : loading ? (
           <div className="relative">
              <Loading 
                 message="Consulting guidelines and generating study material..." 
@@ -475,24 +514,7 @@ const App: React.FC = () => {
               </h1>
 
               <div className="text-slate-700 leading-relaxed space-y-4">
-                <ReactMarkdown 
-                  remarkPlugins={[remarkMath, remarkGfm]}
-                  rehypePlugins={[rehypeKatex]}
-                  components={{
-                     h1: ({node, ...props}) => <h2 className="text-2xl font-bold text-slate-800 mt-8 mb-4" {...props} />,
-                     h2: ({node, ...props}) => <h3 className="text-xl font-semibold text-slate-800 mt-6 mb-3" {...props} />,
-                     h3: ({node, ...props}) => <h4 className="text-lg font-medium text-slate-800 mt-4 mb-2" {...props} />,
-                     p: ({node, ...props}) => <p className="mb-4 text-lg" {...props} />,
-                     ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-4 space-y-2" {...props} />,
-                     li: ({node, ...props}) => <li className="pl-1" {...props} />,
-                     strong: ({node, ...props}) => <strong className="font-semibold text-slate-900" {...props} />,
-                     blockquote: ({node, ...props}) => <blockquote className="border-l-4 border-blue-500 pl-4 py-1 italic bg-slate-50 text-slate-600 rounded-r-lg my-6" {...props} />,
-                     table: ({node, ...props}) => <div className="overflow-x-auto mb-6"><table className="min-w-full border-collapse border border-slate-200" {...props} /></div>,
-                     thead: ({node, ...props}) => <thead className="bg-slate-50" {...props} />,
-                     th: ({node, ...props}) => <th className="border border-slate-200 px-4 py-2 text-left font-semibold text-slate-700 text-sm whitespace-nowrap" {...props} />,
-                     td: ({node, ...props}) => <td className="border border-slate-200 px-4 py-2 text-sm text-slate-600" {...props} />,
-                  }}
-                >
+                <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]} components={markdownComponents}>
                   {currentContent.content}
                 </ReactMarkdown>
               </div>

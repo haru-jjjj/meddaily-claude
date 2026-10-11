@@ -6,6 +6,7 @@ const OPENI_BASE = "https://openi.nlm.nih.gov";
 const COMMONS_API = "https://commons.wikimedia.org/w/api.php";
 const TIMEOUT_MS = 8000;
 const MAX_RESULTS = 4;
+const PAGE_SIZE = 8;
 
 function stripHtml(s) {
   return String(s || "")
@@ -41,8 +42,9 @@ async function fetchJson(url) {
   }
 }
 
-async function searchOpenI(q) {
-  const url = `${OPENI_BASE}/api/search?query=${encodeURIComponent(q)}&m=1&n=8`;
+async function searchOpenI(q, page) {
+  const m = page * PAGE_SIZE + 1;
+  const url = `${OPENI_BASE}/api/search?query=${encodeURIComponent(q)}&m=${m}&n=${m + PAGE_SIZE - 1}`;
   const data = await fetchJson(url);
   const list = Array.isArray(data && data.list) ? data.list : [];
   return list
@@ -68,13 +70,14 @@ async function searchOpenI(q) {
     .filter(Boolean);
 }
 
-async function searchCommons(q) {
+async function searchCommons(q, page) {
   const params = new URLSearchParams({
     action: "query",
     generator: "search",
     gsrnamespace: "6",
     gsrsearch: `${q} filetype:bitmap`,
-    gsrlimit: "8",
+    gsrlimit: String(PAGE_SIZE),
+    gsroffset: String(page * PAGE_SIZE),
     prop: "imageinfo",
     iiprop: "url|extmetadata",
     iiurlwidth: "640",
@@ -111,16 +114,18 @@ export default async function handler(req, res) {
     return;
   }
 
+  const page = Math.max(0, Math.min(10, parseInt(String((req.query && req.query.page) || "0"), 10) || 0));
+
   let images = [];
   try {
-    images = await searchOpenI(q);
+    images = await searchOpenI(q, page);
   } catch (e) {
     console.warn("Open-i failed:", e && e.message);
   }
 
   if (images.length < 2) {
     try {
-      images = images.concat(await searchCommons(q));
+      images = images.concat(await searchCommons(q, page));
     } catch (e) {
       console.warn("Commons failed:", e && e.message);
     }
