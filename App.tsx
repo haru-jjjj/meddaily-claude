@@ -6,6 +6,8 @@ import { Button } from './components/Button';
 import { Loading } from './components/Loading';
 import { SourceList } from './components/SourceList';
 import { SettingsModal } from './components/SettingsModal';
+import { ImagePanel } from './components/ImagePanel';
+import { Flowchart } from './components/Flowchart';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -494,6 +496,10 @@ const App: React.FC = () => {
                   {currentContent.content}
                 </ReactMarkdown>
               </div>
+
+              {currentContent.flowchart && <Flowchart code={currentContent.flowchart} />}
+
+              <ImagePanel queries={currentContent.imageQueries || []} language={activeLanguage} />
 
               <SourceList sources={currentContent.sources} />
 

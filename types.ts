@@ -63,6 +63,18 @@ export interface StudyContent {
   sources: Source[];
   topic: string;
   suggestedTopics?: string[]; // New: List of related keywords for next study
+  imageQueries?: string[]; // English search terms for real images (Open-i / Wikimedia Commons)
+  flowchart?: string; // Optional Mermaid flowchart source for algorithms/pathways
+}
+
+export interface MedicalImage {
+  thumb: string;      // thumbnail URL shown in the grid
+  full: string;       // larger image URL shown when tapped
+  caption: string;    // figure caption / description
+  sourceTitle: string; // article title or file title
+  sourceUrl: string;  // page to open for the original
+  license?: string;   // license label if known
+  provider: 'Open-i' | 'Wikimedia Commons';
 }
 
 export interface GroundingChunk {

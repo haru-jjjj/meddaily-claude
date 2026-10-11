@@ -137,9 +137,18 @@ const STUDY_CARD_TOOL = {
         type: "array",
         items: { type: "string" },
         description: "3 related topics for further study"
+      },
+      imageQueries: {
+        type: "array",
+        items: { type: "string" },
+        description: "1-3 short ENGLISH search phrases for real medical images that would help understanding (e.g. 'erythema migrans skin lesion', 'aortic dissection CT', 'Brugada ECG'). Name the finding plus the modality or 'photo'/'diagram'. Empty array if images would not help."
+      },
+      flowchart: {
+        type: "string",
+        description: "OPTIONAL Mermaid flowchart source (starting with 'flowchart TD') ONLY when the topic has a real decision algorithm or stepwise pathway; otherwise an empty string. Max 12 nodes. Every node label must be in double quotes, e.g. A[\"Suspected PE\"] --> B{\"Wells > 4?\"}. Labels in the card's language. No styling, no subgraphs."
       }
     },
-    required: ["title", "topic", "markdownBody", "sources", "suggestedTopics"]
+    required: ["title", "topic", "markdownBody", "sources", "suggestedTopics", "imageQueries"]
   }
 };
 
@@ -162,7 +171,7 @@ async function callClaudeForStudyCard(system: string, prompt: string, useSearch:
     },
     body: JSON.stringify({
       model: MODEL_NAME,
-      max_tokens: 2000,
+      max_tokens: 3000,
       system: system + `\n\nWhen you are ready to give your final answer, call submit_study_card exactly once with the complete content. Do not answer in plain text.`,
       messages: [{ role: "user", content: prompt }],
       tools,
@@ -211,7 +220,13 @@ function toStudyContent(input: any, language: Language): StudyContent {
     content: stripCitationMarkup(input.markdownBody || "No content generated."),
     topic: input.topic || "General",
     sources,
-    suggestedTopics: Array.isArray(input.suggestedTopics) ? input.suggestedTopics : []
+    suggestedTopics: Array.isArray(input.suggestedTopics) ? input.suggestedTopics : [],
+    imageQueries: Array.isArray(input.imageQueries)
+      ? input.imageQueries.filter((q: any) => typeof q === "string" && q.trim()).slice(0, 3)
+      : [],
+    flowchart: typeof input.flowchart === "string" && /^\s*(flowchart|graph)\s/i.test(input.flowchart)
+      ? input.flowchart.trim()
+      : undefined
   };
 }
 
@@ -376,6 +391,7 @@ export const generateMedicalTopic = async (
       1. **ACCURACY**: ${needsSearch ? "Use web_search to verify facts before answering." : "Rely on well-established, textbook-level medical knowledge."}
       2. **SOURCES**: List 2-3 specific sources${needsSearch ? " (URLs)" : " (textbook, guideline name, or 'general clinical knowledge')"}.
       3. **NEXT STEPS**: Suggest 3 related topics.
+      4. **VISUALS**: Give imageQueries (English) for real images of the key finding/lesion/test. Add a Mermaid flowchart only if there is a genuine algorithm or pathway.
     `;
 
     try {
@@ -422,6 +438,7 @@ export const generateTopicFromKeyword = async (
       1. Use web_search to verify facts.
       2. Include 2-3 sources.
       3. Include 3 suggested topics.
+      4. Give imageQueries (English) for real images of the key finding/lesion/test. Add a Mermaid flowchart only if there is a genuine algorithm or pathway.
       [Random Seed: ${randomSalt}]
     `;
 
@@ -458,6 +475,7 @@ export const rewriteContent = async (
         2. Adjust detail level to match the new length.
         3. Rely on well-established, textbook-level medical knowledge (this topic was already verified when first generated).
         4. Keep "topic" exactly as: "${currentTopic}"
+        5. Give imageQueries (English) for real images of the key finding/lesion/test. Add a Mermaid flowchart only if there is a genuine algorithm or pathway.
       `;
 
     try {
